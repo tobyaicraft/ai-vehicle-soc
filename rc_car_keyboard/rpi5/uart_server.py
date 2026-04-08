@@ -1,6 +1,6 @@
 """
 RC Car UART Server (RPi5)
-TCP 소켓으로 PC 키보드 명령 수신 → UART로 TC237에 전달
+TCP 소켓으로 PC 키보드 명령 수신 → UART(ttyAMA2, GPIO4/5)로 TC237에 전달
 
 Usage:
     python3 uart_server.py                          # 기본: 포트 9000, UART /dev/serial0
