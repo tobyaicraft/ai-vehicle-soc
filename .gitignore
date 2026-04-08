@@ -1,0 +1,28 @@
+# Model files (large binaries)
+*.onnx
+*.pt
+best_ncnn_model/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Images
+image/
+
+# Claude Code local settings
+.claude/
+
+# Memory (local only)
+memory/
+
+# Markdown context files (conversation exports)
+AICRAFTER_CONTEXT_*.md
+RC_CAR_KEYBOARD_CONTEXT.md
+build-log-*.md
+raspi-youtube-script*.md
+model_comparison.md
+2026-03-30_servo_color_tracking.md
+
+# Generated image
+hedra-image-*.png
