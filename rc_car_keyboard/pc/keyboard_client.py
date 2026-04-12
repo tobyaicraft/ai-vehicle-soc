@@ -1,10 +1,10 @@
 """
 RC Car Keyboard Client
-PC에서 키보드 입력(WASD + Space)을 감지하여 TCP 소켓으로 RPi5에 1바이트 명령 전송
+PC에서 키보드 입력(방향키 + U/I)을 감지하여 TCP 소켓으로 RPi5에 1바이트 명령 전송
 
 Usage:
-    python keyboard_client.py                    # 기본: 192.168.30.34:9000
-    python keyboard_client.py 192.168.30.34 9000 # IP/포트 지정
+    python keyboard_client.py                    # 기본: 192.168.0.23:9000
+    python keyboard_client.py 192.168.0.23 9000  # IP/포트 지정
 """
 
 import socket
@@ -12,15 +12,21 @@ import sys
 from pynput import keyboard
 
 # --- Configuration ---
-DEFAULT_HOST = "192.168.30.28"
+DEFAULT_HOST = "192.168.0.23"
 DEFAULT_PORT = 9000
 
-# Key → UART command mapping
-KEY_MAP = {
-    'w': b'F',  # Forward
-    's': b'B',  # Backward
-    'a': b'L',  # Left
-    'd': b'R',  # Right
+# 방향키 → UART 명령
+ARROW_MAP = {
+    keyboard.Key.up:    b'F',   # Forward
+    keyboard.Key.down:  b'B',   # Backward
+    keyboard.Key.left:  b'L',   # Left
+    keyboard.Key.right: b'R',   # Right
+}
+
+# 서보 제어 키 (누를 때마다 스텝 이동)
+SERVO_MAP = {
+    'u': b'U',  # 서보 왼쪽으로 스텝
+    'i': b'I',  # 서보 오른쪽으로 스텝
 }
 
 STOP_CMD = b'S'
@@ -31,6 +37,8 @@ CMD_NAMES = {
     b'L': 'Left',
     b'R': 'Right',
     b'S': 'Stop',
+    b'U': 'Servo Left',
+    b'I': 'Servo Right',
 }
 
 
@@ -39,8 +47,8 @@ class KeyboardClient:
         self.host = host
         self.port = port
         self.sock = None
-        self.last_cmd = None
-        self.pressed_keys = set()
+        self.last_move_cmd = None
+        self.pressed_arrows = set()
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -48,52 +56,58 @@ class KeyboardClient:
         self.sock.connect((self.host, self.port))
         print(f"[Connected] {self.host}:{self.port}")
 
-    def send_cmd(self, cmd):
-        if cmd == self.last_cmd:
+    def send_cmd(self, cmd, is_move=True):
+        # 이동 명령은 동일 명령 중복 방지, 서보 명령은 매번 전송
+        if is_move and cmd == self.last_move_cmd:
             return
         try:
             self.sock.sendall(cmd)
-            self.last_cmd = cmd
+            if is_move:
+                self.last_move_cmd = cmd
             print(f"  [TX] {cmd.decode()} ({CMD_NAMES.get(cmd, '?')})")
         except (BrokenPipeError, ConnectionResetError, OSError):
             print("[Disconnected] Connection lost")
-            self.last_cmd = None
+            self.last_move_cmd = None
             raise
 
     def on_press(self, key):
-        try:
-            ch = key.char.lower() if key.char else None
-        except AttributeError:
-            if key == keyboard.Key.space:
-                self.send_cmd(STOP_CMD)
-            elif key == keyboard.Key.esc:
-                print("\n[Exit] ESC pressed")
-                return False
+        # 방향키
+        if key in ARROW_MAP:
+            self.pressed_arrows.add(key)
+            self.send_cmd(ARROW_MAP[key], is_move=True)
             return
 
-        if ch in KEY_MAP:
-            self.pressed_keys.add(ch)
-            self.send_cmd(KEY_MAP[ch])
+        # 특수키
+        if key == keyboard.Key.space:
+            self.send_cmd(STOP_CMD, is_move=True)
+            return
+        if key == keyboard.Key.esc:
+            print("\n[Exit] ESC pressed")
+            return False
 
-    def on_release(self, key):
+        # 문자키 (서보)
         try:
             ch = key.char.lower() if key.char else None
         except AttributeError:
-            ch = None
+            return
 
-        if ch in self.pressed_keys:
-            self.pressed_keys.discard(ch)
+        if ch in SERVO_MAP:
+            self.send_cmd(SERVO_MAP[ch], is_move=False)
 
-        if not self.pressed_keys:
-            self.send_cmd(STOP_CMD)
+    def on_release(self, key):
+        if key in self.pressed_arrows:
+            self.pressed_arrows.discard(key)
+            if not self.pressed_arrows:
+                self.send_cmd(STOP_CMD, is_move=True)
 
     def run(self):
         print("=" * 40)
         print("  RC Car Keyboard Controller")
         print("=" * 40)
         print(f"  Target: {self.host}:{self.port}")
-        print("  W=Forward  S=Backward")
-        print("  A=Left     D=Right")
+        print("  ↑=Forward   ↓=Backward")
+        print("  ←=Left      →=Right")
+        print("  U=Servo←    I=Servo→")
         print("  Space=Stop  ESC=Exit")
         print("=" * 40)
 
