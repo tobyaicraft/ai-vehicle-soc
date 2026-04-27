@@ -26,3 +26,7 @@ model_comparison.md
 
 # Generated image
 hedra-image-*.png
+
+# Environment secrets
+.env
+run_voice.bat

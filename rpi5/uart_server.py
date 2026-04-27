@@ -52,9 +52,10 @@ CMD_NAMES = {
     'S': '정지 (Stop)',
     'U': '서보 왼쪽',
     'I': '서보 오른쪽',
+    'P': '자동 주차 (Auto Parking)',
 }
 
-UART_CMDS = {'F', 'B', 'L', 'R', 'S'}
+UART_CMDS = {'F', 'B', 'L', 'R', 'S', 'P'}
 SERVO_CMDS = {'U', 'I'}
 
 

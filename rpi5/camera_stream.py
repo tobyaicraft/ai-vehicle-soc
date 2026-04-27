@@ -156,7 +156,7 @@ try:
     print("=" * 40)
     print("  RPi5 Camera + Blue Detection")
     print("=" * 40)
-    print("  브라우저 접속: http://192.168.0.23:8000")
+    print("  브라우저 접속: http://192.168.30.22:8000")
     print("  종료:          Ctrl+C")
     print("=" * 40)
     server.serve_forever()
