@@ -53,16 +53,19 @@ CMD_NAMES = {
     'U': '서보 왼쪽',
     'I': '서보 오른쪽',
     'P': '자동 주차 (Auto Parking)',
+    'X': 'MCU 리셋 (Reset)',
 }
 
 UART_CMDS = {'F', 'B', 'L', 'R', 'S', 'P'}
 SERVO_CMDS = {'U', 'I'}
+RESET_CMD = {'X'}
 
 # --- TC237 패킷 프로토콜 (AA LEN CMD PAYLOAD CHK 55) ---
 PROTO_STX = 0xAA
 PROTO_ETX = 0x55
 CMD_MOVE  = 0x01
 CMD_MODE  = 0x02
+CMD_RESET = 0x30
 DEFAULT_SPEED = 100  # 모터 속도 (0~100%)
 
 # PC 키 → MOVE 방향 매핑
@@ -87,6 +90,13 @@ def build_mode_packet(mode):
     cmd = CMD_MODE
     chk = cmd ^ mode
     return bytes([PROTO_STX, 0x02, cmd, mode, chk, PROTO_ETX])
+
+
+def build_reset_packet():
+    """TC237 RESET 패킷 생성: AA 01 30 30 55"""
+    cmd = CMD_RESET
+    chk = cmd
+    return bytes([PROTO_STX, 0x01, cmd, chk, PROTO_ETX])
 
 
 # --- 하드웨어 PWM 헬퍼 ---
@@ -170,6 +180,14 @@ def handle_command(cmd_byte, ser, servo):
         pkt = build_mode_packet(2)  # VEHICLE_MODE_AUTO
         with uart_write_lock:
             ser.write(pkt)
+        print(f"  [RX→UART]  {cmd} → {name}  (pkt={pkt.hex()})")
+    elif cmd == 'X':
+        # MCU 소프트 리셋
+        pkt = build_reset_packet()
+        with uart_write_lock:
+            ser.write(pkt)
+        with last_move_lock:
+            last_move_pkt = None
         print(f"  [RX→UART]  {cmd} → {name}  (pkt={pkt.hex()})")
     elif cmd in SERVO_CMDS:
         direction = +1 if cmd == 'U' else -1
