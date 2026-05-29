@@ -58,6 +58,36 @@ CMD_NAMES = {
 UART_CMDS = {'F', 'B', 'L', 'R', 'S', 'P'}
 SERVO_CMDS = {'U', 'I'}
 
+# --- TC237 패킷 프로토콜 (AA LEN CMD PAYLOAD CHK 55) ---
+PROTO_STX = 0xAA
+PROTO_ETX = 0x55
+CMD_MOVE  = 0x01
+CMD_MODE  = 0x02
+DEFAULT_SPEED = 100  # 모터 속도 (0~100%)
+
+# PC 키 → MOVE 방향 매핑
+DIR_MAP = {
+    'S': 0,  # STOP
+    'F': 1,  # FORWARD
+    'B': 2,  # REVERSE
+    'L': 3,  # LEFT (spin)
+    'R': 4,  # RIGHT (spin)
+}
+
+
+def build_move_packet(direction, speed=DEFAULT_SPEED):
+    """TC237 MOVE 패킷 생성: AA 03 01 dir speed chk 55"""
+    cmd = CMD_MOVE
+    chk = cmd ^ direction ^ speed
+    return bytes([PROTO_STX, 0x03, cmd, direction, speed, chk, PROTO_ETX])
+
+
+def build_mode_packet(mode):
+    """TC237 MODE 패킷 생성: AA 02 02 mode chk 55"""
+    cmd = CMD_MODE
+    chk = cmd ^ mode
+    return bytes([PROTO_STX, 0x02, cmd, mode, chk, PROTO_ETX])
+
 
 # --- 하드웨어 PWM 헬퍼 ---
 def pwm_write(filename, value):
@@ -106,15 +136,41 @@ sensor_lock = threading.Lock()
 # UART write는 명령 처리 스레드에서만 호출되지만, 향후 확장 대비 락 하나 둠
 uart_write_lock = threading.Lock()
 
+# --- MOVE 명령 주기적 재전송 (MCU 200ms 타임아웃 대응) ---
+MOVE_RESEND_INTERVAL = 0.1  # 100ms마다 재전송
+last_move_pkt = None
+last_move_lock = threading.Lock()
+
+
+def move_resend_thread(ser, stop_event):
+    """마지막 MOVE 명령을 100ms마다 재전송하여 MCU 타임아웃 방지"""
+    while not stop_event.is_set():
+        with last_move_lock:
+            pkt = last_move_pkt
+        if pkt:
+            with uart_write_lock:
+                ser.write(pkt)
+        time.sleep(MOVE_RESEND_INTERVAL)
+
 
 def handle_command(cmd_byte, ser, servo):
+    global last_move_pkt
     cmd = cmd_byte.decode('ascii', errors='ignore')
     name = CMD_NAMES.get(cmd, f'Unknown({cmd})')
 
-    if cmd in UART_CMDS:
+    if cmd in DIR_MAP:
+        pkt = build_move_packet(DIR_MAP[cmd])
         with uart_write_lock:
-            ser.write(cmd_byte)
-        print(f"  [RX→UART]  {cmd} → {name}")
+            ser.write(pkt)
+        with last_move_lock:
+            last_move_pkt = pkt if DIR_MAP[cmd] != 0 else None
+        print(f"  [RX→UART]  {cmd} → {name}  (pkt={pkt.hex()})")
+    elif cmd == 'P':
+        # 자동 주차: AUTO 모드 전환
+        pkt = build_mode_packet(2)  # VEHICLE_MODE_AUTO
+        with uart_write_lock:
+            ser.write(pkt)
+        print(f"  [RX→UART]  {cmd} → {name}  (pkt={pkt.hex()})")
     elif cmd in SERVO_CMDS:
         direction = +1 if cmd == 'U' else -1
         angle = servo.step(direction)
@@ -205,8 +261,11 @@ def run_server(cmd_port, sensor_port, uart_port):
                                 args=(ser, stop_event), daemon=True)
     t_sensor = threading.Thread(target=sensor_server_thread,
                                 args=(sensor_port, stop_event), daemon=True)
+    t_resend = threading.Thread(target=move_resend_thread,
+                                args=(ser, stop_event), daemon=True)
     t_reader.start()
     t_sensor.start()
+    t_resend.start()
 
     # 명령 TCP 서버 (9000) — 메인 스레드
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

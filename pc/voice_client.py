@@ -31,7 +31,7 @@ from gtts import gTTS
 import numpy as np
 
 # --- Configuration ---
-DEFAULT_HOST = "192.168.30.22"
+DEFAULT_HOST = "192.168.0.23"
 DEFAULT_CMD_PORT = 9000
 DEFAULT_SENSOR_PORT = 9001
 CLAUDE_MODEL = "claude-sonnet-4-6"

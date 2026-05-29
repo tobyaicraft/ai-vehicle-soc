@@ -1,12 +1,10 @@
 @echo off
 cd /d "%~dp0"
 echo ========================================
-echo   RC Car PC Controller
+echo   RC Car Control Panel
 echo ========================================
-echo   키보드 조종 + 센서 모니터 동시 실행
+echo   카메라 + 키보드 조종 + 센서 모니터 통합
 echo ========================================
 
-start "Sensor Monitor" python sensor_monitor.py
-timeout /t 2 >nul
-python keyboard_client.py
+python control_panel.py %*
 pause
