@@ -212,6 +212,15 @@ class ControlPanel:
         self.entry_host.pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Label(top, text="RPi5 IP:", style="Dark.TLabel").pack(side=tk.RIGHT)
 
+        # Detection mode selector
+        self.detect_combo = ttk.Combobox(top, width=8, state="readonly",
+                                          font=("Consolas", 10))
+        self.detect_combo["values"] = ["none", "blue", "ssd", "cat_custom", "yolo_onnx", "yolo_tflite"]
+        self.detect_combo.set("none")
+        self.detect_combo.pack(side=tk.RIGHT, padx=(5, 0))
+        self.detect_combo.bind("<<ComboboxSelected>>", self._on_detect_mode_change)
+        ttk.Label(top, text="Detect:", style="Dark.TLabel").pack(side=tk.RIGHT)
+
         self.status_var = tk.StringVar(value="Disconnected")
         ttk.Label(top, textvariable=self.status_var, style="Dark.TLabel").pack(
             side=tk.RIGHT, padx=(15, 10))
@@ -517,6 +526,19 @@ class ControlPanel:
             self.cmd_sock.sendall(cmd)
         except OSError:
             pass
+
+    def _on_detect_mode_change(self, event=None):
+        mode = self.detect_combo.get()
+        host = self.entry_host.get().strip()
+        if not host:
+            return
+        try:
+            url = f"http://{host}:{CAM_PORT}/mode/{mode}"
+            urllib.request.urlopen(url, timeout=2)
+            self.cmd_var.set(f"DETECT: {mode.upper()}")
+        except Exception:
+            pass
+        self.root.focus_set()
 
     def _send_reset(self):
         if not self.cmd_sock:
