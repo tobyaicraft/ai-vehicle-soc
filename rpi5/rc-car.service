@@ -1,0 +1,17 @@
+[Unit]
+Description=RC Car Camera + UART Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/home/toby
+Environment=SUDO_USER=toby
+WorkingDirectory=/home/toby/project
+ExecStart=/bin/bash /home/toby/project/rpi5_start.sh
+ExecStop=/bin/kill -SIGINT $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
