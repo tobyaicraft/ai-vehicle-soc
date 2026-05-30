@@ -35,6 +35,10 @@ DEFAULT_SENSOR_PORT = 9001
 DEFAULT_UART = "/dev/ttyAMA2"
 BAUD_RATE = 115200
 
+# --- GPS (NEO-6M on ttyAMA0) ---
+GPS_PORT = "/dev/ttyAMA0"
+GPS_BAUD = 9600
+
 # --- 하드웨어 PWM 서보 (pwmchip0, channel 2 = GPIO 18) ---
 PWM_PATH = "/sys/class/pwm/pwmchip0/pwm2"
 PWM_CHIP = "/sys/class/pwm/pwmchip0"
@@ -265,6 +269,82 @@ def sensor_server_thread(port, stop_event):
     server.close()
 
 
+# --- GPS NMEA Parser ---
+def parse_nmea_coord(raw, direction):
+    """NMEA 좌표 (ddmm.mmmm) → 십진수 도(degrees)"""
+    if not raw or not direction:
+        return 0.0
+    try:
+        if direction in ('N', 'S'):
+            deg = float(raw[:2])
+            minutes = float(raw[2:])
+        else:
+            deg = float(raw[:3])
+            minutes = float(raw[3:])
+        result = deg + minutes / 60.0
+        if direction in ('S', 'W'):
+            result = -result
+        return result
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def gps_reader_thread(stop_event):
+    """NEO-6M GPS 리더: NMEA 파싱 → 9001 브로드캐스트"""
+    try:
+        gps_ser = serial.Serial(GPS_PORT, GPS_BAUD, timeout=1)
+        print(f"  [GPS] Opened {GPS_PORT} @ {GPS_BAUD}")
+    except Exception as e:
+        print(f"  [GPS] Failed to open {GPS_PORT}: {e}")
+        return
+
+    lat = 0.0
+    lon = 0.0
+    speed_kmh = 0.0
+    sats = 0
+
+    buf = ""
+    while not stop_event.is_set():
+        try:
+            raw = gps_ser.read(gps_ser.in_waiting or 1)
+            if not raw:
+                continue
+            buf += raw.decode("ascii", errors="ignore")
+
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+
+                # $GPRMC — 위치, 속도
+                if line.startswith("$GPRMC") or line.startswith("$GNRMC"):
+                    parts = line.split(",")
+                    if len(parts) >= 8 and parts[2] == "A":  # A=valid
+                        lat = parse_nmea_coord(parts[3], parts[4])
+                        lon = parse_nmea_coord(parts[5], parts[6])
+                        try:
+                            speed_kmh = float(parts[7]) * 1.852  # knots→km/h
+                        except ValueError:
+                            speed_kmh = 0.0
+
+                # $GPGGA — 위성 수
+                elif line.startswith("$GPGGA") or line.startswith("$GNGGA"):
+                    parts = line.split(",")
+                    if len(parts) >= 8:
+                        try:
+                            sats = int(parts[7])
+                        except ValueError:
+                            sats = 0
+
+                        # GPS 데이터 브로드캐스트 (GGA 수신 시 1Hz)
+                        gps_line = f"G:{lat:.6f},{lon:.6f},{speed_kmh:.1f},{sats}"
+                        broadcast_sensor_line(gps_line)
+
+        except Exception:
+            time.sleep(0.1)
+
+    gps_ser.close()
+
+
 def run_server(cmd_port, sensor_port, uart_port):
     # UART 초기화
     ser = serial.Serial(uart_port, BAUD_RATE, timeout=0)
@@ -281,9 +361,12 @@ def run_server(cmd_port, sensor_port, uart_port):
                                 args=(sensor_port, stop_event), daemon=True)
     t_resend = threading.Thread(target=move_resend_thread,
                                 args=(ser, stop_event), daemon=True)
+    t_gps = threading.Thread(target=gps_reader_thread,
+                              args=(stop_event,), daemon=True)
     t_reader.start()
     t_sensor.start()
     t_resend.start()
+    t_gps.start()
 
     # 명령 TCP 서버 (9000) — 메인 스레드
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -298,6 +381,7 @@ def run_server(cmd_port, sensor_port, uart_port):
     print(f"  SENSOR: 0.0.0.0:{sensor_port}    (TC237 → RPi → PC)")
     print(f"  UART  : {uart_port} @ {BAUD_RATE}")
     print(f"  SERVO : GPIO 18 HW PWM (pwmchip0/pwm2, init={INIT_ANGLE:.0f}°)")
+    print(f"  GPS   : {GPS_PORT} @ {GPS_BAUD}")
     print("  Waiting for PC client...")
     print("=" * 40)
 

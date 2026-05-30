@@ -31,9 +31,7 @@ from gtts import gTTS
 import numpy as np
 
 # --- Configuration ---
-DEFAULT_HOST = "192.168.0.23"
-DEFAULT_CMD_PORT = 9000
-DEFAULT_SENSOR_PORT = 9001
+from config import RPI5_HOST as DEFAULT_HOST, CMD_PORT as DEFAULT_CMD_PORT, SENSOR_PORT as DEFAULT_SENSOR_PORT
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_HISTORY = 20  # 대화 히스토리 최대 메시지 수
 

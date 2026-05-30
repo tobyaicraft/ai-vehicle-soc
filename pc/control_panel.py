@@ -36,10 +36,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # --- Configuration ---
-DEFAULT_HOST = "192.168.0.23"
-CMD_PORT = 9000
-SENSOR_PORT = 9001
-CAM_PORT = 8000
+from config import RPI5_HOST as DEFAULT_HOST, CMD_PORT, SENSOR_PORT, CAM_PORT
 ADC_MAX = 4095
 VAREF = 5.0
 
@@ -171,6 +168,15 @@ class ControlPanel:
         self.pitch = 0.0
         self.yaw = 0.0
 
+        # GPS
+        self.gps_lat = 0.0
+        self.gps_lon = 0.0
+        self.gps_speed = 0.0
+        self.gps_sats = 0
+        self.gps_home = None  # (lat, lon)
+        self.gps_track = []   # [(lat, lon), ...]
+        self.gps_returning = False
+
         # Servo
         self.servo_angle = 90.0
 
@@ -285,15 +291,53 @@ class ControlPanel:
         top_row = ttk.Frame(right_col, style="Dark.TFrame")
         top_row.pack(fill=tk.BOTH, expand=True)
 
-        # AI Vision placeholder (나중에 카메라 인식 결과 표시)
-        ai_frame = ttk.Frame(top_row, style="Dark.TFrame")
-        ai_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        self.ai_canvas = tk.Canvas(ai_frame, bg=CHART_BG, highlightthickness=0)
-        self.ai_canvas.pack(fill=tk.BOTH, expand=True)
-        self.ai_canvas.create_text(10, 10, text="AI Vision", fill="#6c7086",
-                                    font=("Consolas", 10, "bold"), anchor="nw")
-        self.ai_canvas.create_text(10, 30, text="(Object detection ready)",
-                                    fill="#45475a", font=("Consolas", 9), anchor="nw")
+        # GPS Panel
+        gps_frame = ttk.Frame(top_row, style="Dark.TFrame")
+        gps_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+        # GPS info labels
+        gps_info = ttk.Frame(gps_frame, style="Dark.TFrame")
+        gps_info.pack(fill=tk.X)
+        tk.Label(gps_info, text="GPS", bg=BG_COLOR, fg=ACCENT_U,
+                 font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        self.gps_sats_var = tk.StringVar(value="SAT:0")
+        tk.Label(gps_info, textvariable=self.gps_sats_var, bg=BG_COLOR, fg="#6c7086",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 8))
+        self.gps_speed_var = tk.StringVar(value="0.0 km/h")
+        tk.Label(gps_info, textvariable=self.gps_speed_var, bg=BG_COLOR, fg=ACCENT_U,
+                 font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+
+        # Home / Return buttons
+        self.btn_home = tk.Button(gps_info, text="H:Set Home", width=10,
+                                   bg="#45475a", fg=FG_COLOR, relief=tk.FLAT,
+                                   font=("Consolas", 8, "bold"), cursor="hand2",
+                                   command=self._gps_set_home)
+        self.btn_home.pack(side=tk.RIGHT, padx=2)
+        self.btn_return = tk.Button(gps_info, text="G:Return", width=10,
+                                     bg="#45475a", fg=WARN_COLOR, relief=tk.FLAT,
+                                     font=("Consolas", 8, "bold"), cursor="hand2",
+                                     command=self._gps_return_home)
+        self.btn_return.pack(side=tk.RIGHT, padx=2)
+
+        # GPS coordinate display
+        gps_coord = ttk.Frame(gps_frame, style="Dark.TFrame")
+        gps_coord.pack(fill=tk.X)
+        self.gps_lat_var = tk.StringVar(value="LAT: --")
+        self.gps_lon_var = tk.StringVar(value="LON: --")
+        self.gps_home_var = tk.StringVar(value="HOME: not set")
+        self.gps_dist_var = tk.StringVar(value="")
+        tk.Label(gps_coord, textvariable=self.gps_lat_var, bg=BG_COLOR, fg=FG_COLOR,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(gps_coord, textvariable=self.gps_lon_var, bg=BG_COLOR, fg=FG_COLOR,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(gps_coord, textvariable=self.gps_home_var, bg=BG_COLOR, fg="#6c7086",
+                 font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(gps_coord, textvariable=self.gps_dist_var, bg=BG_COLOR, fg=WARN_COLOR,
+                 font=("Consolas", 9, "bold")).pack(side=tk.LEFT)
+
+        # GPS track canvas (이동 경로 시각화)
+        self.gps_canvas = tk.Canvas(gps_frame, bg=CHART_BG, highlightthickness=0)
+        self.gps_canvas.pack(fill=tk.BOTH, expand=True)
 
         # 3D IMU (compact, right side)
         imu_frame = ttk.Frame(top_row, style="Dark.TFrame", width=300)
@@ -488,6 +532,14 @@ class ControlPanel:
             self._send_reset()
             self.root.after(150, lambda: self._highlight_key("r", False))
 
+        # GPS Home
+        if ch == "h":
+            self._gps_set_home()
+
+        # GPS Return Home
+        if ch == "g":
+            self._gps_return_home()
+
         # ESC
         if key == "Escape":
             self.on_close()
@@ -662,6 +714,20 @@ class ControlPanel:
                             self.yaw = float(parts[2][2:])
                         except (ValueError, IndexError):
                             pass
+                    # GPS: "G:lat,lon,speed,sats"
+                    elif line.startswith("G:"):
+                        try:
+                            parts = line[2:].split(",")
+                            self.gps_lat = float(parts[0])
+                            self.gps_lon = float(parts[1])
+                            self.gps_speed = float(parts[2])
+                            self.gps_sats = int(parts[3])
+                            if self.gps_lat != 0.0 and self.gps_lon != 0.0:
+                                self.gps_track.append((self.gps_lat, self.gps_lon))
+                                if len(self.gps_track) > 1000:
+                                    self.gps_track = self.gps_track[-500:]
+                        except (ValueError, IndexError):
+                            pass
             except OSError:
                 break
 
@@ -755,9 +821,10 @@ class ControlPanel:
         self.imu_labels["P"].configure(text=f"{self.pitch:+07.1f}")
         self.imu_labels["Y"].configure(text=f"{self.yaw:+07.1f}")
 
-        # 2D car + 3D IMU
+        # 2D car + 3D IMU + GPS
         self._draw_car(left_dist, right_dist, us_dist)
         self._draw_3d()
+        self._update_gps_display()
 
         self.root.after(100, self._update_sensors)
 
@@ -817,6 +884,151 @@ class ControlPanel:
         ax.set_box_aspect([1,1,1])
         ax.set_axis_off()
         self.canvas3d.draw_idle()
+
+    # ======================== GPS ========================
+    def _gps_set_home(self):
+        if self.gps_lat != 0.0 and self.gps_lon != 0.0:
+            self.gps_home = (self.gps_lat, self.gps_lon)
+            self.gps_home_var.set(f"HOME: {self.gps_lat:.4f},{self.gps_lon:.4f}")
+            self.cmd_var.set("GPS: Home set")
+
+    def _gps_return_home(self):
+        if self.gps_home is None:
+            self.cmd_var.set("GPS: Home not set")
+            return
+        self.gps_returning = not self.gps_returning
+        if self.gps_returning:
+            self.btn_return.configure(bg=WARN_COLOR, fg=BG_COLOR)
+            self.cmd_var.set("GPS: Returning home...")
+            threading.Thread(target=self._gps_return_loop, daemon=True).start()
+        else:
+            self.btn_return.configure(bg="#45475a", fg=WARN_COLOR)
+            self.cmd_var.set("GPS: Return cancelled")
+            self._send_move(0)
+
+    def _gps_distance(self, lat1, lon1, lat2, lon2):
+        """두 GPS 좌표 간 거리 (미터)"""
+        R = 6371000
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat/2)**2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+             math.sin(dlon/2)**2)
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+    def _gps_bearing(self, lat1, lon1, lat2, lon2):
+        """현재→목표 방위각 (도, 0=북)"""
+        dlon = math.radians(lon2 - lon1)
+        lat1r = math.radians(lat1)
+        lat2r = math.radians(lat2)
+        x = math.sin(dlon) * math.cos(lat2r)
+        y = (math.cos(lat1r) * math.sin(lat2r) -
+             math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon))
+        return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+    def _gps_return_loop(self):
+        """귀환 루프: GPS + IMU Yaw로 Home까지 이동"""
+        while self.gps_returning and self.connected:
+            if self.gps_lat == 0.0 or self.gps_home is None:
+                time.sleep(0.5)
+                continue
+
+            dist = self._gps_distance(self.gps_lat, self.gps_lon,
+                                       self.gps_home[0], self.gps_home[1])
+
+            # 도착 (3m 이내)
+            if dist < 3.0:
+                self._send_move(0)
+                self.gps_returning = False
+                self.root.after(0, lambda: self.btn_return.configure(
+                    bg="#45475a", fg=WARN_COLOR))
+                self.root.after(0, lambda: self.cmd_var.set(
+                    f"GPS: Home reached ({dist:.1f}m)"))
+                break
+
+            # 목표 방위각 vs 현재 Yaw
+            target_bearing = self._gps_bearing(
+                self.gps_lat, self.gps_lon,
+                self.gps_home[0], self.gps_home[1])
+            yaw = self.yaw % 360
+            diff = (target_bearing - yaw + 360) % 360
+
+            # 방향 결정
+            if diff > 30 and diff < 330:
+                if diff < 180:
+                    self._send_move(4)  # RIGHT
+                else:
+                    self._send_move(3)  # LEFT
+            else:
+                self._send_move(1)  # FORWARD
+
+            time.sleep(0.3)
+
+    def _update_gps_display(self):
+        """GPS UI 업데이트"""
+        self.gps_lat_var.set(f"LAT:{self.gps_lat:.6f}")
+        self.gps_lon_var.set(f"LON:{self.gps_lon:.6f}")
+        self.gps_speed_var.set(f"{self.gps_speed:.1f} km/h")
+        self.gps_sats_var.set(f"SAT:{self.gps_sats}")
+
+        # Home까지 거리
+        if self.gps_home and self.gps_lat != 0.0:
+            dist = self._gps_distance(self.gps_lat, self.gps_lon,
+                                       self.gps_home[0], self.gps_home[1])
+            self.gps_dist_var.set(f"→HOME: {dist:.1f}m")
+        else:
+            self.gps_dist_var.set("")
+
+        # 경로 그리기
+        self._draw_gps_track()
+
+    def _draw_gps_track(self):
+        """GPS 이동 경로 캔버스에 그리기"""
+        c = self.gps_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w <= 1 or not self.gps_track:
+            c.create_text(w//2, h//2, text="Waiting for GPS signal...",
+                          fill="#6c7086", font=("Consolas", 10))
+            return
+
+        # 경로 범위 계산
+        lats = [p[0] for p in self.gps_track]
+        lons = [p[1] for p in self.gps_track]
+        lat_min, lat_max = min(lats), max(lats)
+        lon_min, lon_max = min(lons), max(lons)
+
+        # 최소 범위 확보 (너무 작으면 확대 과도)
+        lat_range = max(lat_max - lat_min, 0.0001)
+        lon_range = max(lon_max - lon_min, 0.0001)
+        margin = 0.1  # 10% 여백
+
+        def to_pixel(lat, lon):
+            x = int((lon - lon_min) / lon_range * (w * (1 - 2*margin)) + w * margin)
+            y = int((1 - (lat - lat_min) / lat_range) * (h * (1 - 2*margin)) + h * margin)
+            return x, y
+
+        # 경로 선 그리기
+        if len(self.gps_track) >= 2:
+            points = [to_pixel(p[0], p[1]) for p in self.gps_track]
+            for i in range(1, len(points)):
+                c.create_line(points[i-1][0], points[i-1][1],
+                              points[i][0], points[i][1],
+                              fill=ACCENT_U, width=2)
+
+        # 현재 위치 (빨간 점)
+        cx, cy = to_pixel(self.gps_lat, self.gps_lon)
+        c.create_oval(cx-5, cy-5, cx+5, cy+5, fill="#f38ba8", outline="")
+        c.create_text(cx, cy-12, text="NOW", fill="#f38ba8",
+                      font=("Consolas", 8, "bold"))
+
+        # Home 위치 (초록 점)
+        if self.gps_home:
+            hx, hy = to_pixel(self.gps_home[0], self.gps_home[1])
+            c.create_oval(hx-5, hy-5, hx+5, hy+5, fill=ACCENT_U, outline="")
+            c.create_text(hx, hy-12, text="HOME", fill=ACCENT_U,
+                          font=("Consolas", 8, "bold"))
 
     # ======================== Cleanup ========================
     def on_close(self):
