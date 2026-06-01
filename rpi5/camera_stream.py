@@ -56,6 +56,9 @@ MIN_AREA = 500
 detect_mode = "none"
 detect_lock = Lock()
 
+# --- 최신 검출 결과 (PC 폴링용) ---
+last_detection = {"box": None, "conf": 0.0, "timestamp": 0.0}
+
 # --- 모델 인스턴스 ---
 ssd_net = None
 cat_onnx_session = None
@@ -172,6 +175,16 @@ def detect_cat_custom(frame):
             best_conf = conf
             best_box = (int((cx - bw/2)*sx), int((cy - bh/2)*sy),
                         int((cx + bw/2)*sx), int((cy + bh/2)*sy))
+
+    # 검출 결과를 전역에 저장 (PC 폴링용)
+    with detect_lock:
+        if best_box:
+            last_detection["box"] = list(best_box)
+            last_detection["conf"] = best_conf
+        else:
+            last_detection["box"] = None
+            last_detection["conf"] = 0.0
+        last_detection["timestamp"] = time.time()
 
     if best_box:
         x1, y1, x2, y2 = best_box
@@ -415,6 +428,23 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain')
             self.send_header('Content-Length', len(content))
+            self.end_headers()
+            self.wfile.write(content)
+        elif self.path == '/detect':
+            import json
+            with detect_lock:
+                data = {
+                    "box": last_detection["box"],
+                    "conf": last_detection["conf"],
+                    "frame_w": FRAME_W,
+                    "frame_h": FRAME_H,
+                    "timestamp": last_detection["timestamp"],
+                }
+            content = json.dumps(data).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', len(content))
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(content)
         elif self.path == '/stream.mjpg':

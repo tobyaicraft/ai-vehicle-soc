@@ -28,6 +28,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# 이전 프로세스 정리 (수동 실행 잔여 프로세스)
+pkill -f camera_stream 2>/dev/null
+pkill -f uart_server 2>/dev/null
+pkill -f libcamera 2>/dev/null
+sleep 2
+
 # 파일 존재 확인
 for f in "$CAM_SCRIPT" "$UART_SCRIPT"; do
     if [ ! -f "$f" ]; then
@@ -57,17 +63,17 @@ echo "  RC Car All-in-One Launcher"
 echo "========================================"
 echo ""
 
-# 1) 카메라 스트리밍 + 파랑색 인식
+# 1) 카메라 스트리밍 + 검출
 python3 -u "$CAM_SCRIPT" > >(sed 's/^/[CAM ] /') 2>&1 &
 CAM_PID=$!
-echo "  [1/2] Camera + Blue Detection (PID $CAM_PID)"
+echo "  [1/2] Camera + Detection (PID $CAM_PID)"
 
 sleep 2
 
-# 2) UART 서버 (키보드 명령 + 센서 브로드캐스트)
+# 2) UART 서버 (키보드 명령 + 센서 + GPS)
 python3 -u "$UART_SCRIPT" > >(sed 's/^/[UART] /') 2>&1 &
 UART_PID=$!
-echo "  [2/2] UART + Sensor Relay   (PID $UART_PID)"
+echo "  [2/2] UART + Sensor + GPS (PID $UART_PID)"
 
 echo ""
 echo "========================================"
@@ -83,5 +89,5 @@ echo "  종료: Ctrl+C"
 echo "========================================"
 echo ""
 
-wait -n
+wait
 cleanup

@@ -36,7 +36,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # --- Configuration ---
-from config import RPI5_HOST as DEFAULT_HOST, CMD_PORT, SENSOR_PORT, CAM_PORT
+from config import RPI5_HOST as DEFAULT_HOST, RPI5_HOSTS, CMD_PORT, SENSOR_PORT, CAM_PORT
 ADC_MAX = 4095
 VAREF = 5.0
 
@@ -177,6 +177,11 @@ class ControlPanel:
         self.gps_track = []   # [(lat, lon), ...]
         self.gps_returning = False
 
+        # Driving Mode
+        self.drive_mode = "MANUAL"  # "MANUAL", "CAT_TRACK", "GPS_RETURN"
+        self.cat_track_running = False
+        self.cat_no_detect_count = 0
+
         # Servo
         self.servo_angle = 90.0
 
@@ -213,10 +218,20 @@ class ControlPanel:
                                        command=self._toggle_connect)
         self.btn_connect.pack(side=tk.RIGHT, padx=(5, 0))
 
-        self.entry_host = ttk.Entry(top, width=18)
-        self.entry_host.insert(0, self.host)
+        self.entry_host = ttk.Combobox(top, width=18, font=("Consolas", 10))
+        self.entry_host["values"] = RPI5_HOSTS
+        self.entry_host.set(self.host)
         self.entry_host.pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Label(top, text="RPi5 IP:", style="Dark.TLabel").pack(side=tk.RIGHT)
+
+        # Driving mode selector
+        self.drive_combo = ttk.Combobox(top, width=10, state="readonly",
+                                          font=("Consolas", 10))
+        self.drive_combo["values"] = ["MANUAL", "CAT_TRACK", "GPS_RETURN"]
+        self.drive_combo.set("MANUAL")
+        self.drive_combo.pack(side=tk.RIGHT, padx=(5, 0))
+        self.drive_combo.bind("<<ComboboxSelected>>", self._on_drive_mode_change)
+        ttk.Label(top, text="Mode:", style="Dark.TLabel").pack(side=tk.RIGHT)
 
         # Detection mode selector
         self.detect_combo = ttk.Combobox(top, width=8, state="readonly",
@@ -490,6 +505,11 @@ class ControlPanel:
     def _on_key_press(self, event):
         key = event.keysym
 
+        # 자동 모드에서 방향키/스페이스 차단
+        if self.drive_mode != "MANUAL":
+            if key in DIR_MAP or key == "space":
+                return
+
         # Arrow keys
         if key in DIR_MAP:
             if key not in self.pressed_keys:
@@ -549,7 +569,7 @@ class ControlPanel:
         if key in DIR_MAP:
             self.pressed_keys.discard(key)
             self._highlight_key(key, False)
-            if not self.pressed_keys:
+            if not self.pressed_keys and self.drive_mode == "MANUAL":
                 self._send_move(0)  # STOP
 
     def _highlight_key(self, key, active):
@@ -782,7 +802,7 @@ class ControlPanel:
         """100ms마다 마지막 방향키 재전송 (MCU 200ms 타임아웃 대응)"""
         dir_to_ascii = {1: b'F', 2: b'B', 3: b'L', 4: b'R'}
         while self.connected and not self.stop_event.is_set():
-            if self.pressed_keys and self.cmd_sock:
+            if self.pressed_keys and self.cmd_sock and self.drive_mode == "MANUAL":
                 for key in list(self.pressed_keys):
                     if key in DIR_MAP:
                         cmd = dir_to_ascii.get(DIR_MAP[key])
@@ -885,6 +905,113 @@ class ControlPanel:
         ax.set_axis_off()
         self.canvas3d.draw_idle()
 
+    # ======================== Drive Mode ========================
+    def _on_drive_mode_change(self, event=None):
+        new_mode = self.drive_combo.get()
+        old_mode = self.drive_mode
+
+        if new_mode == old_mode:
+            self.root.focus_set()
+            return
+
+        # 차량 정지
+        self._send_move(0)
+
+        # 이전 모드 정리
+        if old_mode == "CAT_TRACK":
+            self.cat_track_running = False
+        elif old_mode == "GPS_RETURN":
+            self.gps_returning = False
+            self.btn_return.configure(bg="#45475a", fg=WARN_COLOR)
+
+        self.drive_mode = new_mode
+
+        # 새 모드 진입
+        if new_mode == "MANUAL":
+            self.detect_combo.configure(state="readonly")
+            self.cmd_var.set("MODE: MANUAL")
+
+        elif new_mode == "CAT_TRACK":
+            self.detect_combo.set("cat_custom")
+            self.detect_combo.configure(state="disabled")
+            self._on_detect_mode_change()
+            self.cat_track_running = True
+            self.cat_no_detect_count = 0
+            threading.Thread(target=self._cat_track_loop, daemon=True).start()
+            self.cmd_var.set("MODE: CAT_TRACK")
+
+        elif new_mode == "GPS_RETURN":
+            self.detect_combo.configure(state="disabled")
+            if self.gps_home is None:
+                self.cmd_var.set("GPS: Home not set")
+                self.drive_mode = "MANUAL"
+                self.drive_combo.set("MANUAL")
+                self.detect_combo.configure(state="readonly")
+            else:
+                self.gps_returning = True
+                self.btn_return.configure(bg=WARN_COLOR, fg="#1e1e2e")
+                threading.Thread(target=self._gps_return_loop, daemon=True).start()
+                self.cmd_var.set("MODE: GPS_RETURN")
+
+        self.root.focus_set()
+
+    def _cat_track_loop(self):
+        """CAT_TRACK: /detect 폴링 → 바운딩 박스 기반 자동 조향"""
+        import json
+
+        host = self.entry_host.get().strip()
+        url = f"http://{host}:{CAM_PORT}/detect"
+
+        while self.cat_track_running and self.connected:
+            try:
+                resp = urllib.request.urlopen(url, timeout=1)
+                data = json.loads(resp.read().decode('utf-8'))
+            except Exception:
+                time.sleep(0.2)
+                continue
+
+            box = data.get("box")
+            frame_w = data.get("frame_w", 640)
+            frame_h = data.get("frame_h", 480)
+
+            if box is None:
+                self.cat_no_detect_count += 1
+                if self.cat_no_detect_count > 5:
+                    self._send_move(0)  # target lost → STOP
+                    self.root.after(0, lambda: self.cmd_var.set("CAT: LOST"))
+                time.sleep(0.15)
+                continue
+
+            self.cat_no_detect_count = 0
+            x1, y1, x2, y2 = box
+            box_cx = (x1 + x2) / 2.0
+            box_w = x2 - x1
+            box_h = y2 - y1
+            box_area = box_w * box_h
+            frame_area = frame_w * frame_h
+
+            # 수평 오프셋: -1.0 (왼쪽) ~ +1.0 (오른쪽)
+            offset_x = (box_cx - frame_w / 2.0) / (frame_w / 2.0)
+            area_ratio = box_area / frame_area
+
+            TURN_THRESHOLD = 0.25
+            CLOSE_THRESHOLD = 0.25
+
+            if area_ratio > CLOSE_THRESHOLD:
+                self._send_move(0)  # 너무 가까움 → STOP
+                self.root.after(0, lambda: self.cmd_var.set("CAT: CLOSE"))
+            elif offset_x < -TURN_THRESHOLD:
+                self._send_move(3)  # LEFT
+                self.root.after(0, lambda: self.cmd_var.set("CAT: LEFT"))
+            elif offset_x > TURN_THRESHOLD:
+                self._send_move(4)  # RIGHT
+                self.root.after(0, lambda: self.cmd_var.set("CAT: RIGHT"))
+            else:
+                self._send_move(1)  # FORWARD
+                self.root.after(0, lambda: self.cmd_var.set("CAT: FORWARD"))
+
+            time.sleep(0.15)
+
     # ======================== GPS ========================
     def _gps_set_home(self):
         if self.gps_lat != 0.0 and self.gps_lon != 0.0:
@@ -944,6 +1071,10 @@ class ControlPanel:
                     bg="#45475a", fg=WARN_COLOR))
                 self.root.after(0, lambda: self.cmd_var.set(
                     f"GPS: Home reached ({dist:.1f}m)"))
+                # 자동으로 MANUAL 모드 복귀
+                self.drive_mode = "MANUAL"
+                self.root.after(0, lambda: self.drive_combo.set("MANUAL"))
+                self.root.after(0, lambda: self.detect_combo.configure(state="readonly"))
                 break
 
             # 목표 방위각 vs 현재 Yaw
